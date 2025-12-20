@@ -1,0 +1,13 @@
+flask
+flask-cors
+opensearch-py
+spacy
+dateparser
+geopy
+sentence-transformers
+beautifulsoup4
+lxml
+tqdm
+numpy
+scikit-learn
+nltk
