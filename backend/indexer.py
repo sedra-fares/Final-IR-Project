@@ -122,8 +122,8 @@ def load_documents(path):
 # Index Creation
 # -------------------------
 def create_index():
-    if client.indices.exists(INDEX_NAME):
-        client.indices.delete(INDEX_NAME)
+    if client.indices.exists(index=INDEX_NAME):
+        client.indices.delete(index=INDEX_NAME)
 
     mapping = {
         "settings": {
