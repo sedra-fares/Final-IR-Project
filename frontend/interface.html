@@ -69,11 +69,12 @@ body {
 
 <ul id="suggestions" class="list-group"></ul>
 
-<div class="mt-3 d-flex flex-wrap gap-3 justify-content-center align-items-center">
+<div class="mt-3 d-flex flex-wrap gap-2 justify-content-center align-items-center">
 <strong>Filter by:</strong>
 <button class="btn btn-outline-primary" onclick="openDateModal()">📅 Calendar</button>
 <button class="btn btn-outline-primary" onclick="openMapModal()">🗺️ Location</button>
 <button class="btn btn-outline-primary" onclick="openSizeModal()">📄 Size</button>
+<button class="btn btn-outline-danger" onclick="clearFilters()">🗑️ Clear Filters</button>
 </div>
 
 <p id="chosenLocation" class="mt-2 text-muted"></p>
@@ -222,9 +223,9 @@ bootstrap.Modal.getInstance(mapModal).hide();
 
 function openDateModal(){ new bootstrap.Modal(dateModal).show(); }
 function confirmDate(){
-selectedFrom=fromDate.value;
-selectedTo=toDate.value;
-bootstrap.Modal.getInstance(dateModal).hide();
+    selectedFrom = fromDate.value ? fromDate.value + "T00:00:00" : null;
+    selectedTo = toDate.value ? toDate.value + "T23:59:59" : null;  // Inclusive end
+    bootstrap.Modal.getInstance(dateModal).hide();
 }
 
 function openSizeModal(){ new bootstrap.Modal(sizeModal).show(); }
@@ -253,6 +254,25 @@ suggestions.appendChild(li);
 });
 }
 
+function clearFilters() {
+    selectedFrom = null;
+    selectedTo = null;
+    selectedSize = 10;
+    selectedLat = null;
+    selectedLon = null;
+    locationName = "";
+
+    document.getElementById("chosenLocation").innerText = "";
+    document.getElementById("fromDate").value = "";
+    document.getElementById("toDate").value = "";
+    document.getElementById("sizeSelect").value = "10";
+
+
+    // Optional: give feedback
+    alert("All filters cleared!");
+    // Or better: show a toast/message if you have Bootstrap toasts
+}
+
 async function performSearch(){
 suggestions.innerHTML="";
 const q=searchInput.value.trim();
@@ -261,7 +281,15 @@ if(!q) return;
 let url=`${API_BASE}/search?q=${encodeURIComponent(q)}&size=${selectedSize}`;
 if(selectedFrom) url+=`&from=${selectedFrom}`;
 if(selectedTo) url+=`&to=${selectedTo}`;
-if(selectedLat && selectedLon) url+=`&lat=${selectedLat}&lon=${selectedLon}`;
+let geoParam = "";
+if (locationName) {
+    geoParam = encodeURIComponent(locationName);
+} else if (selectedLat && selectedLon) {
+    geoParam = `${selectedLat},${selectedLon}`;
+}
+if (geoParam) {
+    url += `&geo=${geoParam}`;
+}
 
 const res=await fetch(url);
 const data=await res.json();
@@ -285,6 +313,9 @@ card.innerHTML=`
 <div class="meta">📅 ${doc.date||"N/A"}</div>
 <div class="meta">👤 ${authors}</div>
 <div class="meta">📍 ${locations}</div>
+<div class="text-muted d-block mb-2">📊
+            Relevance score: <strong>${doc.score ? doc.score.toFixed(3) : "N/A"}</strong>
+        </div>
 <p class="mt-2">${(doc.content||"").substring(0,150)}...</p>
 `;
 card.onclick=()=>openDocument(doc, authors, locations);
@@ -297,7 +328,9 @@ docTitle.innerText=doc.title||"Untitled";
 docDate.innerText=doc.date||"N/A";
 docAuthor.innerText=authors;
 docLocation.innerText=locations;
-docContent.innerText=doc.content||"";
+let scoreText = doc.score ? `Relevance score: ${doc.score.toFixed(3)}` : "Score not available";
+    docContent.innerHTML = `<small class="text-muted">${scoreText}</small><hr>${doc.content || ""}`;
+
 new bootstrap.Modal(docModal).show();
 }
 </script>
