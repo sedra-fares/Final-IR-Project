@@ -7,15 +7,16 @@ import dateparser
 import spacy
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderUnavailable
-from dateparser.search import search_dates
+from dateparser import parse as dateparser_parse
 from geopy.distance import geodesic
 from opensearchpy import OpenSearch
 from opensearchpy.helpers import bulk
 from sentence_transformers import SentenceTransformer
 
 # ================= CONFIG =================
-DATA_PATH = r"C:\Users\User\OneDrive\Desktop\Final-IR-Project\Final-IR-Project\data\reut2-0000.sgm"
+DATA_DIR = r"C:\Users\User\OneDrive\Desktop\Final-IR-Project\Final-IR-Project\data"
 INDEX_NAME = "reuters_ir_knn"
+DOCS_PER_FILE = 20
 # =========================================
 
 # OpenSearch
@@ -77,7 +78,6 @@ def geocode_cached(name, retries=3):
 
 
 def extract_georeferences(text, sgml_places):
-
     names = set(sgml_places or [])
     additional_names = set()  # Collect new countries here
     points = []
@@ -85,20 +85,19 @@ def extract_georeferences(text, sgml_places):
     # spaCy NER
     doc = nlp(text)
     for ent in doc.ents:
-        if ent.label_ in ("GPE", "LOC"):
+        if ent.label_ in ("GPE", "LOC", "NORP", "ORG"):
             name = ent.text.strip()
             if len(name) < 3 or name.isdigit() or re.search(r"\d", name):
                 continue
             names.add(name)
 
     # Geocode and extract countries without modifying during iteration
-    for name in list(names):  # Use list() to make a copy for safe iteration
+    for name in list(names):
         loc = geocode_cached(name)
         if loc:
             lat, lon = loc["lat"], loc["lon"]
             points.append({"lat": lat, "lon": lon})
 
-            # Reverse geocode to get country
             try:
                 reverse_loc = geolocator.reverse((lat, lon), language="en", timeout=10)
                 if reverse_loc and reverse_loc.raw.get("address"):
@@ -108,18 +107,56 @@ def extract_georeferences(text, sgml_places):
             except (GeocoderTimedOut, GeocoderUnavailable):
                 pass
             except Exception as e:
-                print(f"Reverse geocode error for {name}: {e}")
+                print(f"Reverse geocode error for '{name}': {e}")
 
     # Now safely add the new countries
     names.update(additional_names)
 
+    # === ADD THIS BLOCK HERE ===
+    # Normalize case for analytics consistency (so "Canada" and "canada" become one bucket)
+    normalized_names = set()
+    for name in names:
+        normalized_names.add(name.lower())
+
+    # Use lowercase for indexing (analytics will group them correctly)
+    names = list(normalized_names)
+    # ===========================
+
     return list(names), points
+    
+import re
+from datetime import datetime
+
 
 def extract_temporal_expressions(text):
-    found = search_dates(text, settings={"PREFER_DATES_FROM": "past"})
-    if not found:
-        return []
-    return [d.isoformat() for _, d in found if d]
+    dates = set()
+
+    # spaCy finds DATE entities
+    doc = nlp(text)
+    for ent in doc.ents:
+        if ent.label_ == "DATE":
+            parsed = dateparser_parse(
+                ent.text,
+                settings={
+                    "PREFER_DATES_FROM": "past",
+                    "RELATIVE_BASE": datetime(1987, 1, 1),
+                    "RETURN_AS_TIMEZONE_AWARE": False
+                }
+            )
+            if parsed:
+                # If the original text contains a 4-digit year → keep original year
+                if re.search(r'\b(19|20)\d{2}\b', ent.text):
+                    dates.add(parsed.isoformat())
+                else:
+                    # No year in text → force 1987
+                    try:
+                        parsed_1987 = parsed.replace(year=1987)
+                        dates.add(parsed_1987.isoformat())
+                    except ValueError:
+                        # Handles invalid dates like Feb 29 in non-leap year
+                        pass
+
+    return list(dates)
 
 # -------------------------
 # Reuters SGML Loader (Single File)
@@ -275,11 +312,22 @@ def create_index():
             "date": {"type": "date"},
             "geopoint": {"type": "geo_point"},
             "temporal_expressions": {"type": "date"},
-            "georeferences": {"type": "geo_point"},
-            "georeference_names": {"type": "keyword"},
-            "original_sgml_places": {"type": "keyword"}
+            "georeference_names": {
+                "type": "text",
+                "analyzer": "standard",
+                "fields": {
+                  "keyword": {"type": "keyword"}
+    }
+ },
+ "original_sgml_places": {
+    "type": "text",
+    "analyzer": "standard",
+    "fields": {
+        "keyword": {"type": "keyword"}
+    }
         }
     }
+ }
 }
     client.indices.create(index=INDEX_NAME, body=mapping)
     print(f"Created index: {INDEX_NAME}")
@@ -336,7 +384,6 @@ def doc_to_action(doc_id, title, body, authors, explicit_date, places):
         "authors": authors,
         "date": date_val,
         "temporal_expressions": temporal,
-        "georeferences": geo_points,
         "georeference_names": geo_names,
         "geopoint": geopoint,
         "original_sgml_places": places
@@ -354,24 +401,36 @@ def doc_to_action(doc_id, title, body, authors, explicit_date, places):
 def bulk_index():
     create_index()
     actions = []
-    total = 0
+    total_indexed = 0  # This will be our global counter
 
-    for doc_id, title, body, authors, explicit_date, places in load_documents(DATA_PATH):
-        action = doc_to_action(doc_id, title, body, authors, explicit_date, places)
-        actions.append(action)
+    # Get all .sgm files in the directory, sorted for consistency
+    sgm_files = sorted([f for f in os.listdir(DATA_DIR) if f.endswith(".sgm")])
+    print(f"Found {len(sgm_files)} SGML files: {sgm_files}")
 
-        if len(actions) >= 300:
-            success, _ = bulk(client, actions)
-            total += success
-            print(f"Indexed {success} documents, total: {total}")
-            actions = []
+    for filename in sgm_files:
+        file_path = os.path.join(DATA_DIR, filename)
+        print(f"\nProcessing {filename} — indexing first {DOCS_PER_FILE} documents...")
 
-    if actions:
-        success, _ = bulk(client, actions)
-        total += success
-        print(f"Final batch: {success} documents, total: {total}")
+        doc_counter = 0
+        file_actions = []
 
-    print(f"Indexing complete! Total indexed: {total}")
+        for doc_id,title, body, authors, explicit_date, places in load_documents(file_path):
+            if doc_counter >= DOCS_PER_FILE:
+                break  # Stop after 300 documents from this file
+
+            # Use global ID: total_indexed + 1
+            doc_id = str(total_indexed + 1)
+            action = doc_to_action(doc_id, title, body, authors, explicit_date, places)
+            file_actions.append(action)
+            doc_counter += 1
+            total_indexed += 1  # Increment global counter (temporary)
+
+        # Bulk index this file's documents
+        if file_actions:
+            success, _ = bulk(client, file_actions)
+            print(f"Indexed {success} documents from {filename} (total so far: {total_indexed})")
+
+    print(f"\nIndexing complete! Total indexed: {total_indexed} documents")
 
 if __name__ == "__main__":
     bulk_index()
