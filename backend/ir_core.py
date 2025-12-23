@@ -52,7 +52,8 @@ def lexical_search(query, start_date=None, end_date=None, size=10):
                     "multi_match": {
                         "query": query,
                         "fields": ["title^5", "content"],
-                        "fuzziness": "AUTO"
+                        "fuzziness": "AUTO" ,
+                       
                     }
                 }],
                 "filter": filters
@@ -92,7 +93,7 @@ def semantic_search(query, size=10):
 def smart_hybrid_search(
     query_tuple,  # Tuple: (query_text, start_date, end_date, georeference)
     size: int = 10
- ):
+):
     """
     Advanced hybrid search with:
     - Lexical + semantic retrieval
@@ -142,7 +143,7 @@ def smart_hybrid_search(
             except:
                 pass
         if lat is None:
-            loc = geocode_cached(g)  # Make sure this function is available
+            loc = geocode_cached(g)
             if loc:
                 lat, lon = loc["lat"], loc["lon"]
             elif "usa" in g.lower():
@@ -150,25 +151,16 @@ def smart_hybrid_search(
 
     query_point = (lat, lon) if lat is not None and lon is not None else None
 
-    # 1. Lexical search
-    lex_body = {
-        "size": size * 5,
-        "query": {
-            "bool": {
-                "must": [{"multi_match": {"query": query_text, "fields": ["title^5", "content"]}}],
-                "filter": [range_filter] if range_filter else []
-            }
-        }
-    }
-    lex_hits = client.search(index=INDEX_NAME, body=lex_body)["hits"]["hits"]
+    # 1. Lexical search using reusable function
+    lex_hits = lexical_search(
+        query=query_text,
+        start_date=start_date_input,
+        end_date=end_date_input,
+        size=size * 5
+    )
 
-    # 2. Semantic search
-    query_vector = model.encode(query_text).tolist()
-    sem_body = {
-        "size": size * 10,
-        "query": {"knn": {"content_vector": {"vector": query_vector, "k": size * 10}}}
-    }
-    sem_hits = client.search(index=INDEX_NAME, body=sem_body)["hits"]["hits"]
+    # 2. Semantic search using reusable function
+    sem_hits = semantic_search(query=query_text, size=size * 10)
 
     # 3. Combine candidates
     candidates = {}
@@ -212,7 +204,7 @@ def smart_hybrid_search(
             }
 
     # 4. Re-ranking
-    now = datetime(1987, 12, 31)  # Corpus year
+    now = datetime(1987, 12, 31)
     query_words = set(query_text.lower().split())
 
     ranked = []
@@ -246,13 +238,31 @@ def smart_hybrid_search(
                 except:
                     pass
 
+        # Content boost (with cap)
+        content_words = set(source.get("content", "").lower().split())
+        content_matches = len(query_words.intersection(content_words))
+        final_score *= min(3.0, 1 + content_matches * 0.7)  # Cap at 3x boost
+
         ranked.append((info["hit"], final_score))
 
     ranked.sort(key=lambda x: x[1], reverse=True)
-    top_hits = []
-    for hit, final_score in ranked[:size]:
-       hit["_score"] = round(final_score, 3)  # Show real hybrid score
-       top_hits.append(hit)
+
+    # === SCALE SCORES TO 0–100 ===
+    if ranked:
+        scores = [score for _, score in ranked]
+        min_score = min(scores)
+        max_score = max(scores)
+        score_range = max_score - min_score if max_score > min_score else 1
+
+        top_hits = []
+        for hit, score in ranked[:size]:
+            normalized = (score - min_score) / score_range
+            score_100 = normalized * 100
+            hit["_score"] = round(score_100, 2)
+            top_hits.append(hit)
+    else:
+        top_hits = []
+
     return {"hits": {"hits": top_hits}}
 # -------------------------
 # Autocomplete
@@ -269,7 +279,7 @@ def autocomplete_titles(prefix, size=10):
             "bool": {
                 "should": [
                     {"match_phrase_prefix": {"title": {"query": prefix}}},
-                    {"match": {"title": {"query": prefix, "fuzziness": 1, "prefix_length": 1}}}
+                    {"match": {"title": {"query": prefix, "fuzziness": 1, "prefix_length": 2}}}
                 ]
             }
         }
@@ -288,121 +298,48 @@ def autocomplete_titles(prefix, size=10):
 
 
 
-'''def spatio_temporal_search(
-        text: str = None,
-        start: str = None,
-        end: str = None,
-        country: str = None,
-        lat: float = None,
-        lon: float = None,
-        radius_km: int = 50,
-        size: int = 10
-        ):
-       
 
-    filters = []
-    # Date range filter
-    if start or end:
-     rng = {}
-    if start:
-        rng["gte"] = start
-    if end:
-        rng["lte"] = end
-    filters.append({"range": {"date": rng}})
 
-    # Country filter (exact match; if variants are an issue, normalize queries or use match with analyzer)
-    if country:
-     filters.append({"term": {"georeference_names.keyword": country}})
-
-    # Geo distance filter
-    if lat is not None and lon is not None:
-     filters.append({
-        "geo_distance": {
-            "distance": f"{radius_km}km",
-            "geopoint": {"lat": lat, "lon": lon}
-        }
-    })
-
-    # Base queries: lexical + semantic (if text provided)
-    base_should = []
-    if text:
-     base_should.append({"multi_match": {"query": text, "fields": ["title^5", "content"]}})
-    query_vector = [float(x) for x in get_embedding_cached(text)]
-    base_should.append({
-        "knn": {
-            "field": "content_vector",
-            "query_vector": query_vector,
-            "k": size,
-            "num_candidates": 100
-        }
-    })
-
-    # If no text, default to match_all
-    if not base_should:
-     base_should.append({"match_all": {}})
-    
-     functions = [
-            {
-                "gauss": {
-                    "date": {
-                        "origin": "now",
-                        "scale": "365d",
-                        "decay": 0.9
-                    }
-                }
-            }
-        ]
-     if lat is not None and lon is not None:
-            functions.append({
-                "gauss": {
-                    "geopoint": {
-                        "origin": {"lat": lat, "lon": lon},
-                        "scale": "2000km",
-                        "decay": 0.8
-                    }
-                }
-            })
-
-   
-     body = {
-            "size": size,
-            "query": {
-                "function_score": {
-                    "query": {
-                        "bool": {
-                            "should": base_should,
-                            "filter": filters if filters else []  # Empty filters mean no filtering
-                        }
-                    },
-                    "functions": functions,
-                    "boost_mode": "multiply",
-                    "score_mode": "multiply"
-                }
-            },
-            "_source": ["title", "content", "date", "georeference_names", "geopoint"]
-        }
-
-     return client.search(index=INDEX_NAME, body=body)
-'''
-
-def analytics_top_georefs_and_timeline(top_n=10):
+def fetch_analytics_data(top_n=10):
+    """Fetch top georeferences and daily timeline directly from the index"""
     body = {
         "size": 0,
+        "query": {"match_all": {}},
         "aggs": {
             "top_places": {
                 "terms": {
-                    "field": "georeference_names.keyword",
+                    "field": "georeference_names.keyword",  
                     "size": top_n,
                     "order": {"_count": "desc"}
                 }
             },
             "timeline": {
-                "date_histogram": {
-                    "field": "date",
-                    "calendar_interval": "day",
-                    "format": "yyyy-MM-dd"
+                "filter": {"exists": {"field": "date"}},  # Only docs with date
+                "aggs": {
+                    "by_day": {
+                        "date_histogram": {
+                            "field": "date",
+                            "calendar_interval": "day",
+                            "min_doc_count": 0,
+                            "format": "yyyy-MM-dd"
+                        }
+                    }
                 }
             }
         }
     }
-    return client.search(index=INDEX_NAME, body=body)
+
+    response = client.search(index=INDEX_NAME, body=body)
+
+    # Extract top georeferences
+    geo_buckets = response['aggregations']['top_places']['buckets']
+    geo_data = [{"location": bucket['key'], "count": bucket['doc_count']} for bucket in geo_buckets]
+
+    # Extract daily timeline
+    daily_buckets = response['aggregations']['timeline']['by_day']['buckets']
+    daily_data = {}
+    for bucket in daily_buckets:
+        if bucket['doc_count'] > 0:
+            daily_data[bucket['key_as_string']] = bucket['doc_count']
+
+    return geo_data, daily_data
