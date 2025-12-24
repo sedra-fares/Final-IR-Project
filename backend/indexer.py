@@ -13,10 +13,12 @@ from opensearchpy import OpenSearch
 from opensearchpy.helpers import bulk
 from sentence_transformers import SentenceTransformer
 
+
+
 # ================= CONFIG =================
 DATA_DIR = r"C:\Users\User\OneDrive\Desktop\Final-IR-Project\Final-IR-Project\data"
 INDEX_NAME = "reuters_ir_knn"
-DOCS_PER_FILE = 20
+DOCS_PER_FILE = 1000
 # =========================================
 
 # OpenSearch
@@ -123,9 +125,6 @@ def extract_georeferences(text, sgml_places):
     # ===========================
 
     return list(names), points
-    
-import re
-from datetime import datetime
 
 
 def extract_temporal_expressions(text):
@@ -316,16 +315,12 @@ def create_index():
                 "type": "text",
                 "analyzer": "standard",
                 "fields": {
-                  "keyword": {"type": "keyword"}
-    }
- },
- "original_sgml_places": {
-    "type": "text",
-    "analyzer": "standard",
-    "fields": {
-        "keyword": {"type": "keyword"}
-    }
-        }
+                  "keyword": {"type": "keyword"}}},
+            "original_sgml_places": {
+                 "type": "text",
+                 "analyzer": "standard",
+                 "fields": {
+                    "keyword": {"type": "keyword"}}}
     }
  }
 }

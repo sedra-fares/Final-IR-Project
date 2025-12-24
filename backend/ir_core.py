@@ -17,20 +17,6 @@ client = OpenSearch(
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # -------------------------
-# Helpers
-# -------------------------
-def recency_boost(date_str, decay=365):
-    if not date_str:
-        return 0.0
-    try:
-        d = datetime.fromisoformat(date_str)
-        days = (datetime.now() - d).days
-        return exp(-days / decay)
-    except:
-        return 0.0
-
-
-# -------------------------
 # Lexical Search
 # -------------------------
 def lexical_search(query, start_date=None, end_date=None, size=10):
@@ -90,19 +76,9 @@ def semantic_search(query, size=10):
 # -------------------------
 # Hybrid Search
 # -------------------------
-def smart_hybrid_search(
-    query_tuple,  # Tuple: (query_text, start_date, end_date, georeference)
-    size: int = 10
-):
-    """
-    Advanced hybrid search with:
-    - Lexical + semantic retrieval
-    - Date range filtering
-    - Geo proximity boost
-    - Title match boost
-    - Recency boost
-    - Final manual re-ranking
-    """
+def smart_hybrid_search(query_tuple,  # Tuple: (query_text, start_date, end_date, georeference)
+ size: int = 10):
+   
     if not isinstance(query_tuple, tuple) or len(query_tuple) != 4:
         raise ValueError("Query must be a tuple: (query_text, start_date, end_date, georeference)")
 
